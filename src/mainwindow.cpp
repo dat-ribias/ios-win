@@ -18,12 +18,91 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStyle>
+#include <QSysInfo>
 #include <QSystemTrayIcon>
 #include <QComboBox>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QTextStream>
+
+namespace {
+const char *kLegacyDefaultArgs = "-n uxplay-windows -nh";
+const char *kDefaultProfile = "balanced";
+
+QString defaultAirPlayName() {
+    QString name = QSysInfo::machineHostName().trimmed();
+    if (name.isEmpty()) {
+        name = qEnvironmentVariable("COMPUTERNAME").trimmed();
+    }
+    if (name.isEmpty()) {
+        name = "Windows-PC";
+    }
+    name.replace(' ', '-');
+    return name;
+}
+
+QString appDisplayName() {
+    return QString("AirPlay - %1").arg(defaultAirPlayName());
+}
+
+QString defaultArgs() {
+    return QString("-n %1 -nh -s 1920x1080@60 -fps 60 -vsync no").arg(defaultAirPlayName());
+}
+
+bool hasOption(const QStringList &args, const QString &option) {
+    return args.contains(option);
+}
+
+void removeOptionWithValue(QStringList &args, const QString &option) {
+    for (int i = 0; i < args.size();) {
+        if (args[i] == option) {
+            args.removeAt(i);
+            if (i < args.size() && !args[i].startsWith("-")) {
+                args.removeAt(i);
+            }
+            continue;
+        }
+        ++i;
+    }
+}
+
+void removeFlag(QStringList &args, const QString &option) {
+    while (true) {
+        int idx = args.indexOf(option);
+        if (idx < 0) return;
+        args.removeAt(idx);
+    }
+}
+
+void applyDefaultAirPlayName(QStringList &args) {
+    int nameIdx = args.indexOf("-n");
+    bool useDefaultName = false;
+
+    if (nameIdx < 0 || nameIdx >= args.size() - 1) {
+        useDefaultName = true;
+    } else {
+        QString currentName = args[nameIdx + 1];
+        useDefaultName = currentName == "uxplay-windows" || currentName == "UxPlay";
+    }
+
+    if (!useDefaultName) return;
+
+    if (nameIdx >= 0) {
+        args.removeAt(nameIdx);
+        if (nameIdx < args.size() && !args[nameIdx].startsWith("-")) {
+            args.removeAt(nameIdx);
+        }
+    }
+
+    args.prepend(defaultAirPlayName());
+    args.prepend("-n");
+
+    if (!hasOption(args, "-nh")) {
+        args.insert(2, "-nh");
+    }
+}
+}
 
 struct RenameData {
     DWORD pid;
@@ -83,27 +162,42 @@ void MainWindow::ensureSettingsFileExists() {
     if (!file.exists()) {
         if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
             QTextStream out(&file);
-            out << "-n uxplay-windows -nh";
+            out << defaultArgs();
             file.close();
         }
+    } else if (file.open(QIODevice::ReadWrite | QIODevice::Text)) {
+        QString content = QTextStream(&file).readAll().trimmed();
+        if (content == kLegacyDefaultArgs || content.startsWith("-n uxplay-windows ")) {
+            file.resize(0);
+            QTextStream out(&file);
+            QStringList args = content.split(" ", Qt::SkipEmptyParts);
+            applyDefaultAirPlayName(args);
+            out << args.join(" ");
+        }
+        file.close();
     }
 }
 
 QStringList MainWindow::getArgumentsFromFile() {
     QString appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QFile file(appDataPath + "/arguments.txt");
+    QStringList args;
     if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         QString content = QTextStream(&file).readAll().trimmed();
         file.close();
-        return content.split(" ", Qt::SkipEmptyParts);
+        args = content.split(" ", Qt::SkipEmptyParts);
+    } else {
+        args = defaultArgs().split(" ", Qt::SkipEmptyParts);
     }
-    return QStringList() << "-n" << "uxplay-windows" << "-nh";
+    applyDefaultAirPlayName(args);
+    applyStreamingProfileArgs(args);
+    return args;
 }
 
 void MainWindow::setupUI() {
-    setWindowTitle("uxplay-windows");
+    setWindowTitle(appDisplayName());
     setWindowIcon(QApplication::windowIcon());
-    setFixedSize(300, 260);
+    setFixedSize(320, 330);
 
     auto *central = new QWidget(this);
     setCentralWidget(central);
@@ -129,14 +223,39 @@ void MainWindow::setupUI() {
             &MainWindow::toggleForceFullscreen);
     layout->addWidget(m_fullscreenCheckbox);
 
+    auto *streamProfileLabel = new QLabel("Streaming Profile", this);
+    layout->addWidget(streamProfileLabel);
+
+    m_streamProfileCombo = new QComboBox(this);
+    m_streamProfileCombo->addItem("Low Latency (720p60)", "latency");
+    m_streamProfileCombo->addItem("Balanced (1080p60)", "balanced");
+    m_streamProfileCombo->addItem("Sharp Text (1080p30)", "sharp");
+    m_streamProfileCombo->addItem("HEVC / 4K (Experimental)", "hevc4k");
+    m_streamProfileCombo->addItem("Custom Arguments", "custom");
+
+    {
+        QString saved = settings.value("stream_profile", kDefaultProfile).toString();
+        int idx = m_streamProfileCombo->findData(saved);
+        if (idx >= 0) m_streamProfileCombo->setCurrentIndex(idx);
+    }
+
+    connect(m_streamProfileCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onStreamingProfileChanged);
+
+    layout->addWidget(m_streamProfileCombo);
+
     // Renderer dropdown
+    auto *rendererLabel = new QLabel("Video Renderer", this);
+    layout->addWidget(rendererLabel);
+
     m_rendererCombo = new QComboBox(this);
     m_rendererCombo->addItem("Video Renderer (Auto)", "auto");
     m_rendererCombo->addItem("D3D11", "d3d11");
     m_rendererCombo->addItem("D3D12", "d3d12");
 
     {
-        QString saved = settings.value("renderer_mode", "auto").toString();
+        QString saved = settings.value("renderer_mode", "d3d11").toString();
         int idx = m_rendererCombo->findData(saved);
         if (idx >= 0) m_rendererCombo->setCurrentIndex(idx);
     }
@@ -168,6 +287,39 @@ void MainWindow::setupUI() {
     updateStatus();
 }
 
+void MainWindow::applyStreamingProfileArgs(QStringList &args) const {
+    QSettings settings;
+    QString profile = settings.value("stream_profile", kDefaultProfile).toString();
+
+    if (profile == "custom") {
+        if (!hasOption(args, "-s") && !hasOption(args, "-h265")) {
+            args << "-s" << "1920x1080@60";
+        }
+        if (!hasOption(args, "-fps")) {
+            args << "-fps" << "60";
+        }
+        if (!hasOption(args, "-vsync")) {
+            args << "-vsync" << "no";
+        }
+        return;
+    }
+
+    removeOptionWithValue(args, "-s");
+    removeOptionWithValue(args, "-fps");
+    removeOptionWithValue(args, "-vsync");
+    removeFlag(args, "-h265");
+
+    if (profile == "latency") {
+        args << "-s" << "1280x720@60" << "-fps" << "60" << "-vsync" << "no";
+    } else if (profile == "sharp") {
+        args << "-s" << "1920x1080@60" << "-fps" << "30" << "-vsync" << "no";
+    } else if (profile == "hevc4k") {
+        args << "-h265" << "-s" << "3840x2160@60" << "-fps" << "60" << "-vsync" << "no";
+    } else {
+        args << "-s" << "1920x1080@60" << "-fps" << "60" << "-vsync" << "no";
+    }
+}
+
 void MainWindow::openSettingsFile() {
     QString appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QString filePath = appDataPath + "/arguments.txt";
@@ -192,7 +344,7 @@ void MainWindow::setupTray() {
         trayIcon = QApplication::style()->standardIcon(QStyle::SP_MediaPlay);
     }
     m_tray->setIcon(trayIcon);
-    m_tray->setToolTip("uxplay-windows");
+    m_tray->setToolTip(appDisplayName());
 
     m_trayMenu = new QMenu(this);
     m_trayMenu->addAction("Quit", this, &MainWindow::quit);
@@ -219,7 +371,7 @@ void MainWindow::toggleBle(bool checked) {
 
     settings.setValue("ble_enabled", checked);
     
-    m_tray->showMessage("uxplay-windows", "Please restart the uxplay-windows to apply changes.\n(Right-click the Tray Icon)", 
+    m_tray->showMessage(appDisplayName(), "Please restart the uxplay-windows to apply changes.\n(Right-click the Tray Icon)",
                         QSystemTrayIcon::Information, 3000);
 }
 
@@ -230,7 +382,7 @@ void MainWindow::toggleForceFullscreen(bool checked) {
     }
 
     settings.setValue("force_fs_enabled", checked);
-    m_tray->showMessage("uxplay-windows", "Please restart the uxplay-windows to apply changes.\n(Right-click the Tray Icon)", 
+    m_tray->showMessage(appDisplayName(), "Please restart the uxplay-windows to apply changes.\n(Right-click the Tray Icon)",
                         QSystemTrayIcon::Information, 3000);
 }
 
@@ -240,11 +392,29 @@ void MainWindow::onRendererChanged(int /*index*/) {
     QString mode = m_rendererCombo->currentData().toString();
 
     QSettings settings;
-    QString saved = settings.value("renderer_mode", "auto").toString();
+    QString saved = settings.value("renderer_mode", "d3d11").toString();
     if (saved == mode) return;
 
     settings.setValue("renderer_mode", mode);
-    m_tray->showMessage("uxplay-windows", "Please restart the uxplay-windows to apply changes.\n(Right-click the Tray Icon)", 
+    stopServer();
+    QTimer::singleShot(500, this, &MainWindow::startServer);
+    m_tray->showMessage(appDisplayName(), "Renderer changed. Reconnect AirPlay to compare.",
+                        QSystemTrayIcon::Information, 3000);
+}
+
+void MainWindow::onStreamingProfileChanged(int /*index*/) {
+    if (!m_streamProfileCombo) return;
+
+    QString profile = m_streamProfileCombo->currentData().toString();
+
+    QSettings settings;
+    QString saved = settings.value("stream_profile", kDefaultProfile).toString();
+    if (saved == profile) return;
+
+    settings.setValue("stream_profile", profile);
+    stopServer();
+    QTimer::singleShot(500, this, &MainWindow::startServer);
+    m_tray->showMessage(appDisplayName(), "Streaming profile changed. Reconnect AirPlay to compare.",
                         QSystemTrayIcon::Information, 3000);
 }
 
@@ -354,7 +524,7 @@ void MainWindow::onAirplayStarted() {
 
         RenameData info;
         info.pid = GetCurrentProcessId();
-        info.newTitle = "AirPlay Video Stream (ALT+ENTER for Fullscreen)"; 
+        info.newTitle = appDisplayName() + " (ALT+ENTER for Fullscreen)";
 
         EnumWindows(EnumWindowsProcRename, reinterpret_cast<LPARAM>(&info));
     });
@@ -373,7 +543,7 @@ void MainWindow::onAirplayStopped() {
 }
 
 void MainWindow::onAirplayError(const QString &message) {
-    m_tray->showMessage("uxplay-windows", message, QSystemTrayIcon::Warning, 3000);
+    m_tray->showMessage(appDisplayName(), message, QSystemTrayIcon::Warning, 3000);
 }
 
 void MainWindow::toggleAutostart() {
@@ -463,9 +633,11 @@ void MainWindow::closeEvent(QCloseEvent *event) {
 }
 
 void MainWindow::updateStatus() {
-    QString status = m_running ? "UxPlay server running" : "UxPlay server stopped";
+    QString status = m_running
+        ? QString("%1 running").arg(defaultAirPlayName())
+        : QString("%1 stopped").arg(defaultAirPlayName());
     m_statusLabel->setText(status);
-    m_autostartBtn->setText(isAutostartEnabled() ? "Open uxplay-windows on login: ON " : "Open uxplay-windows on login: OFF");
+    m_autostartBtn->setText(isAutostartEnabled() ? "Open on login: ON " : "Open on login: OFF");
 }
 
 bool MainWindow::isWindowsServicePresent(const std::wstring& serviceName) const {

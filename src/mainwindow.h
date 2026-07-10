@@ -38,6 +38,7 @@ private slots:
     void toggleBle(bool checked); // bluetooth
     void toggleForceFullscreen(bool checked);
     void onRendererChanged(int index);
+    void onStreamingProfileChanged(int index);
 
 
 private:
@@ -48,6 +49,7 @@ private:
     void updateStatus();
     void startBluetoothBeacon(const QString &path);
     void stopBluetoothBeacon();
+    void applyStreamingProfileArgs(QStringList &args) const;
     void applyRendererAndFullscreenArgs(QStringList &args);
 
     QProcess *m_beacon = nullptr;
@@ -63,6 +65,7 @@ private:
 
     QCheckBox *m_bleCheckbox = nullptr;
     QCheckBox *m_fullscreenCheckbox = nullptr;
+    QComboBox *m_streamProfileCombo = nullptr;
     QComboBox *m_rendererCombo = nullptr;
     QSystemTrayIcon *m_tray = nullptr;
     QMenu *m_trayMenu = nullptr;
