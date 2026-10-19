@@ -12,6 +12,11 @@ Download the latest version of uxplay-windows from [**releases**](https://github
 After installing, control uxplay-windows from it's [tray icon](https://www.odu.edu/sites/default/files/documents/win10-system-tray.pdf)! Right-click it to start or stop AirPlay. \
 You can also set it to run automatically when your PC starts
 
+## 🚀 4K 60FPS (HEVC) Mode & Setup Guide
+This fork includes native support for **HEVC / H.265 4K 60FPS** with Direct3D 11 hardware acceleration and ready-to-run batch launchers.
+- 📖 **Xem hướng dẫn chi tiết cho máy mới tại đây**: [**HUONG_DAN_4K.md**](./HUONG_DAN_4K.md)
+- ⚡ **Khởi chạy 4K một chạm**: Nhấp đúp chuột vào file [`run_4k.bat`](./run_4k.bat). File này tự động thiết lập Registry 4K, Direct3D 11, kiểm tra Bonjour Service và chạy ứng dụng.
+
 ## FAQ — Please Read!
 > [!NOTE]
 > *What is uxplay-windows?*
